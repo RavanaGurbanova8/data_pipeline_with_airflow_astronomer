@@ -1,0 +1,168 @@
+services:
+  mount:
+    build: .
+    container_name: mount
+    volumes:
+      - C:/Users/ravan/OneDrive/Desktop/dataa:/app/data
+
+  minio:
+    image: quay.io/minio/minio:latest
+    container_name: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    restart: always
+
+  bucket-creator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bucket-creator
+    depends_on:
+      minio:
+        condition: service_started
+    environment:
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT}
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+
+  # ---- Airflow üçün lazım olan hissələr ----
+
+  postgres:
+    image: postgres:15
+    container_name: airflow-postgres
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  timescaledb:
+    image: timescale/timescaledb-ha:pg16-ts2.13-all
+    container_name: timescaledb
+    environment:
+      - POSTGRES_USER=${TS_USER}
+      - POSTGRES_PASSWORD=${TS_PASSWORD}
+      - POSTGRES_DB=${TS_DB}
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+
+  airflow-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: airflow-init
+    depends_on:
+      postgres:
+        condition: service_started
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
+      - AIRFLOW__CORE__AUTH_MANAGER=airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+      - AIRFLOW__CORE__EXECUTION_API_SERVER_URL=http://airflow-webserver:8080/execution/
+      - AIRFLOW__API_AUTH__JWT_SECRET=bu_yerde_uzun_ve_sabit_bir_metin_olsun_123456
+      - AIRFLOW__WEBSERVER__SECRET_KEY=bu_yerde_de_uzun_ve_sabit_bir_metin_olsun_654321
+      - AIRFLOW__CORE__PARALLELISM=4
+      - AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG=2
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT}          # ← YENİ
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}      # ← YENİ
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}  
+    entrypoint: /bin/bash
+    command: -c "airflow db migrate && airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com"
+
+  airflow-webserver:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: airflow-webserver
+    depends_on:
+      postgres:
+        condition: service_started
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
+      - AIRFLOW__CORE__AUTH_MANAGER=airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+      - AIRFLOW__CORE__EXECUTION_API_SERVER_URL=http://airflow-webserver:8080/execution/
+      - AIRFLOW__API_AUTH__JWT_SECRET=bu_yerde_uzun_ve_sabit_bir_metin_olsun_123456
+      - AIRFLOW__WEBSERVER__SECRET_KEY=bu_yerde_de_uzun_ve_sabit_bir_metin_olsun_654321
+      - AIRFLOW__CORE__PARALLELISM=4
+      - AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG=2
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT}          # ← YENİ
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}      # ← YENİ
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}  
+    volumes:
+      - ./dags:/opt/airflow/dags
+    ports:
+      - "8080:8080"
+    command: api-server
+
+  airflow-scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: airflow-scheduler
+    depends_on:
+      postgres:
+        condition: service_started
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
+      - AIRFLOW__CORE__AUTH_MANAGER=airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+      - AIRFLOW__CORE__EXECUTION_API_SERVER_URL=http://airflow-webserver:8080/execution/
+      - AIRFLOW__API_AUTH__JWT_SECRET=bu_yerde_uzun_ve_sabit_bir_metin_olsun_123456
+      - AIRFLOW__WEBSERVER__SECRET_KEY=bu_yerde_de_uzun_ve_sabit_bir_metin_olsun_654321
+      - AIRFLOW__CORE__PARALLELISM=4
+      - AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG=2
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT}          # ← YENİ
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}      # ← YENİ
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}  
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - C:/Users/ravan/OneDrive/Desktop/dataa:/app/data  
+    command: scheduler
+  airflow-dag-processor:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: airflow-dag-processor
+    depends_on:
+      postgres:
+        condition: service_started
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
+      - AIRFLOW__CORE__AUTH_MANAGER=airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+      - AIRFLOW__CORE__EXECUTION_API_SERVER_URL=http://airflow-webserver:8080/execution/
+      - AIRFLOW__API_AUTH__JWT_SECRET=bu_yerde_uzun_ve_sabit_bir_metin_olsun_123456
+      - AIRFLOW__WEBSERVER__SECRET_KEY=bu_yerde_de_uzun_ve_sabit_bir_metin_olsun_654321
+      - AIRFLOW__CORE__PARALLELISM=4
+      - AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG=2
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT}          # ← YENİ
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}      # ← YENİ
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}  
+    volumes:
+      - ./dags:/opt/airflow/dags
+    command: dag-processor
+
+volumes:
+  minio_data:
+    driver: local
+  postgres_data:
+    driver: local
+  timescale_data:
+    driver: local
