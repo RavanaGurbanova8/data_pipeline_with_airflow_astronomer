@@ -61,18 +61,135 @@ As you can see that in a task we gave 2 statement. For data before ERP_CHANGE_DA
 
 Instead of branching within tasks, we can also branching within the DAG. It is a bit more simple. Because when you visualize the DAG, you can't see in which task we verified these statements, you should look at the codes of tasks. But while branching within the DAG, you can see in a visualized graph. 
 How to branch them? 
-Let's continue with ERP example. We add 1 more task named pick ERP system. After it, we add 2 separate task for each method. But we should connect them. Fortunately, we can do it with BranchOperator. 
+Let's continue with ERP example. We add 1 more task named pick ERP system. After it, we add 2 separate task for each method. But we should connect them. 
+
+```python
+fetch_sales_old = PythonOperator(...)
+clean_sales_old = PythonOperator(...)
+fetch_sales_new = PythonOperator(...)
+clean_sales_new = PythonOperator(...)
+fetch_sales_old >> clean_sales_old
+fetch_sales_new >> clean_sales_new
+```
+
+Fortunately, we can do it with BranchOperator. BranchOperator will return the Task ID which will be run. 
 Python example:
 
 ```python
+def _pick_erp_system(**context):
+    if context["data_interval_start "] < ERP_CHANGE_DATE:
+        return "fetch_sales_old"
+    else:
+        return "fetch_sales_new"
+pick_erp_system = BranchPythonOperator(
+    task_id="pick_erp_system",
+    python_callable=_pick_erp_system,
+)
+pick_erp_system >> [fetch_sales_old, fetch_sales_new]
+```
+Then we will connect with join_datasets:
+```
+[clean_sales_old, clean_sales_new] >> join_datasets
+```
+But we forgot one fact. In default, all tasks are executed successfully based on trigger_rule=all_success. Based on statement, one of the tasks will be executed, so join_datasets will be skipped. To solve it, you should add one empty task with EmptyOperator before joining datasets and change trigger_rule to none_failed, so none of these tasks will be failed. 
 
+```python
+from airflow.providers.standard.operators.empty import EmptyOperator
+join_branch = EmptyOperator(
+    task_id="join_erp_branch",
+    trigger_rule="none_failed"
+)
+[clean_sales_old, clean_sales_new] >> join_branch
+join_branch >> join_datasets
 ```
 
 ### Conditional Tasks
 
+Imagine that you want to change entire code and use backfilling. We need just deploy model for only recent dataset, If backfilling triggers the DAG for old data intervals, we don't want to retrain and redeploy the model for every one of them — we only want to deploy it for the most recent dataset. You will check between current run's end and next run's end time. If there is no next scheduled run ( this is the last scheduled execution), the model is deployed. So, how to do it?
+1. Conditional within the task. We can check entire the task, but in graph you can't see in which case it would be skipped. 
+
+```python
+def _deploy_model(dag, data_interval_start, data_interval_end, **_):
+    task_exec_start = pendulum.now("UTC")
+    time_restriction = TimeRestriction(earliest=None, latest=None, 
+catchup=True)
+    current_interval = DataInterval(start=data_interval_start, end=data_
+interval_end)
+    next_info = dag.timetable.next_dagrun_info(
+                last_automated_data_interval=current_interval,
+                restriction=time_restriction,
+            )
+    if next_info is None:
+        # Last scheduled execution
+        return True
+    next_info_start, next_info_end = next_info.data_interval
+    if next_info_start < task_exec_start <= next_info_end:
+        print("Deploying model")
+```
+
+2. Making tasks conditional. You add AirflowSkipException to skip task in case of non-recent execution.
+
+```python
+from airflow.exceptions import AirflowSkipException
+from airflow.timetables.base import DataInterval, TimeRestriction
+def _latest_only(dag, data_interval_start, data_interval_end, **_):
+    task_exec_start = pendulum.now("UTC")
+    time_restriction = TimeRestriction(
+        earliest=None,
+        latest=None,
+        catchup=True
+    )
+    current_interval = DataInterval(
+        start=data_interval_start,
+        end=data_interval_end
+    )
+    next_info = dag.timetable.next_dagrun_info(
+                last_automated_data_interval=current_interval,
+                restriction=time_restriction,
+            )                                                    
+    if next_info is None:
+        # Last scheduled execution
+        return True
+    next_info_start, next_info_end = next_info.data_interval
+    if not next_info_start < task_exec_start <= next_info_end:   
+        raise AirflowSkipException("Not the most recent run!")  
+```
+
+3. Using built-in operators. It is more simple way to make tasks conditional. You just add task with LatestOnlyOperator, which checks there is recent run or not. 
+
+```python
+from airflow.providers.standard.operators.latest_only import LatestOnlyOperator
+latest_only = LatestOnlyOperator(
+    task_id="latest_only",
+)
+train_model >> latest_only >> deploy_model
+```
+
 ### Trigger Rules
 
-### Sharing data between tasks
+Trigger rule allows you to execute tasks and trigger DAG based on some rules. In default, the trigger rule is all_success, even if you don't set any trigger rule, all task will be executed with rule "all_success"(all tasks should be run successfully). 
+Upstream tasks' failure or success affect downstream tasks, this is called propagation.
+
+Table 6.1 Overview of the trigger rules Airflow supports
+
+| Trigger rule | Behavior | Example use case |
+|---|---|---|
+| all_success (default) | Triggers when all parent tasks have completed successfully | The default trigger rule for a normal workflow |
+| all_failed | Triggers when all parent tasks have failed (or failed as a result of a failure in their parents) | Triggers error-handling code to clean up temporary resource or aid in alert-ing scenarios |
+| all_done | Triggers when all parents are done executing, regardless of the resulting state | Executes cleanup code that you want to execute when all tasks have finished (e.g., shutting down a machine or stop-ping a cluster) |
+| all_done_setup_success | Triggers when all setup tasks have succeeded and all other upstream tasks are done | Is configured automatically for tear-down tasks; you wouldn't set this rule yourself |
+| all_skipped | Triggers when all parent tasks have been skipped | Executes code that would replace the logic of skipped upstream tasks |
+| one_failed | Triggers as soon as at least one parent fails; doesn't wait for other parent tasks to finish executing | Quickly triggers some error-handling code, such as notifications or rollbacks |
+| one_success | Triggers as soon as one parent suc-ceeds; doesn't wait for other parent tasks to finish executing | Quickly triggers downstream computations/notifications as soon as one result becomes available |
+| one_done | Triggers if at least one upstream task succeeds or fails | Quickly continues with the DAG logic when one task completes execution, whether that task succeeded or failed |
+| none_failed | Triggers if no parents failed but were completed successfully or skipped | Joins conditional branches in Airflow DAGs (section 6.2) |
+| none_failed_min_one_success | Triggers when upstream tasks have not failed (they could have been skipped) but at least one upstream task has succeeded | Joins conditional branches in Airflow DAGs  |
+| none_skipped | Triggers if no parents have been skipped but have completed success-fully or failed | Triggers a task if all upstream tasks were executed, ignoring their result(s) |
+| always | Triggers regardless of the state of any upstream tasks | Performs testing |
+
+### Sharing data between tasks(XComs)
+
+XComs(cross-communication). 
 
 ### Chaining Python tasks with the Tsskflow API
 
