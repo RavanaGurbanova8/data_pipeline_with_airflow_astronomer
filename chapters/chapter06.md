@@ -189,7 +189,114 @@ Table 6.1 Overview of the trigger rules Airflow supports
 
 ### Sharing data between tasks(XComs)
 
-XComs(cross-communication). 
+XComs(cross-communication). It allows you to share a small data, such as string, number, a small list/dict between tasks. There are some ways of using XCom exists:
+1. Use XCom within task. Push and Pull
 
-### Chaining Python tasks with the Tsskflow API
+```python
+def _train_model(**context):
+    model_id = str(uuid.uuid4())
+    context["task_instance"].xcom_push(key="model_id", value=model_id)
 
+
+def _deploy_model(**context):
+    model_id = context["task_instance"].xcom_pull(task_ids="train_model", key="model_id")
+    print(f"Deploying model {model_id}")
+```
+
+2. Return method and then pull
+
+```python
+def _train_model(**context):
+    model_id = str(uuid.uuid4())
+    return model_id
+```
+
+3. XCom template
+
+```python
+def _train_model(**context):
+    model_id = str(uuid.uuid4())
+    context["task_instance"].xcom_push(key="model_id", value=model_id)
+
+
+def _deploy_model(templates_dict, **context):
+    model_id = templates_dict["model_id"]
+    print(f"Deploying model {model_id}")
+
+......
+
+    train_model = PythonOperator(task_id="train_model", python_callable=_train_model)
+
+    deploy_model = PythonOperator(
+        task_id="deploy_model",
+        python_callable=_deploy_model,
+        templates_dict={"model_id": "{{task_instance.xcom_pull(task_ids='train_model', key='model_id')}}"},
+    )
+```
+
+4. Using XCom backends
+
+```python
+from typing import Any
+from airflow.sdk.bases.xcomimport BaseXCom
+class CustomXComBackend(BaseXCom):
+    @staticmethod
+    def serialize_value(value: Any):
+        ...
+    @staticmethod
+    def deserialize_value(result) -> Any:
+```
+
+serialize => push
+deserialize => pull
+
+#### When you should/shouldn't use XCom?
+
+Use XCom if:
+1. Data is small — a string, number, single row, etc.
+2. You share data between tasks within a single DAG.
+3. The result affects how the next task behaves (e.g., branching decision).
+
+Don't use XCom if:
+1. Data is large (e.g., a dataset, asset, many rows, a CSV file). Instead, upload the data to storage (e.g., S3) and pass only the reference/path via XCom.
+2. You're only setting task order, with no data to pass — use >> / << instead.
+3. Data is sensitive — use Airflow Connections or a Secrets Backend instead.
+4. You need to share data between DAGs — use TriggerDagRunOperator, Datasets/Assets, or ExternalTaskSensor.
+5. Splitting a single logical operation across tasks connected by XCom risks partial failure (e.g., task 1 fetches data successfully, but task 2 fails) — consider whether it should be one atomic task instead.
+
+### Chaining Python tasks with the Taskflow API
+
+You can define tasks with @task decorator. It simplify code, you don't need to write all operators. 
+You can use just @task decorator, and @task decorator and operator together. In addition you can define DAGs with @dag decorator.
+
+```python
+...
+from airflow.sdk import task
+...
+with DAG(...):
+    ...
+    @task
+    def train_model():
+        model_id = str(uuid.uuid4())
+        return model_id
+```
+
+```python
+import uuid
+from airflow.sdk import task, dag
+@dag(  
+    start_date=...,
+    schedule=...,
+)
+def taskflow_api_decorator():  
+    @task  
+    def train_model():
+        model_id = str(uuid.uuid4())
+        return model_id
+    @task  
+    def deploy_model(model_id: str):
+        print(f"Deploying model {model_id}")
+    model_id = train_model()
+    deploy_model(model_id)  
+taskflow_api_decorator()  
+```
