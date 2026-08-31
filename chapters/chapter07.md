@@ -62,5 +62,109 @@ Another way to solve is using deferable operators. Standard operators are synchr
 
 #### Starting workflows with the REST API and CLI
 
+You can also trigger the DAGs via REST API and CLI(Command-Line Interface). Instead of triggering manual in Airflow UI, you write command in the terminal(CLI).
+
+```bash
+airflow dags trigger dag1
+```
+You can also trigger with spesific configuration:
+
+```bash
+airflow dags trigger -c '{"supermarket_id" : 1}' dag1
+```
+```bash
+airflow dags trigger ---conf '{"supermarket_id": 1}' dag1
+```
+
+You can also configurate in python script:
+
+```python
+import pendulum
+from airflow.sdk import DAG
+from airflow.providers.standard.operators.python import PythonOperator
+def print_conf(**context):
+   print(context["dag_run"].conf)   
+with DAG(
+    dag_id="11_inspect_dag_run_config",
+    start_date=pendulum.today("UTC").add(days=-3),
+    schedule=None,
+):
+process = PythonOperator(
+    task_id="process",
+    python_callable=print_conf,
+)
+```
+
+So, tasks will print all information of conf:
+
+```
+...
+{task_command.py:423} INFO - Running <TaskInstance:
+➥ 19_inspect_dag_run_configuration.process
+➥ manual__2024-04-20T07:11:47+00:00 [running]> on host
+➥ aa69e3a53421
+{logging_mixin.py:188} INFO - {'supermarket_id': 1}
+{python.py:201} INFO - Done. Returned value was: None
+(taskinstance.py:1138} INFO - Marking task as SUCCESS.
+➥ dag_id=11_inspect_dag_run_configuration, task_id=process,
+➥ execution_date=20240420T071147, start_date=20240420T071149,
+➥ end_date=20240420T071149
+{local_task_job_runner.py:234} INFO - Task exited with return code 0
+{taskinstance.py:3281} INFO - 0 downstream tasks scheduled from
+➥ follow-on schedule check
+```
+How to trigger the DAG via REST API? You don't send username and password, you just add your Airflow API authentication with airflow:airflow\ and send your request with POST command. Then you add configuration as dictionary(conf).
+
+```bash
+curl \-u airflow:airflow \-X POST \
+"http://localhost:8080/api/v1/dags/11_inspect_dag_run_config/dagRuns" \-H  "Content-Type: application/json" \-d '{"conf": {"supermarket": 1}}'
+{
+}
+  "conf": {
+    "supermarket_id": 1
+  },
+  "dag_id": "11_inspect_dag_run_config",
+  "dag_run_id": "manual__2024-04-20T08:10:46.623540+00:00",
+  "data_interval_end": "2024-04-20T00:00:00+00:00",
+  "data_interval_start": "2024-04-19T00:00:00+00:00",
+  "end_date": null,
+  "execution_date": "2024-04-20T08:10:46.623540+00:00",
+  "external_trigger": true,
+  "last_scheduling_decision": null,
+  "logical_date": "2024-04-20T08:10:46.623540+00:00",
+  "note": null,
+  "run_type": "manual",
+  "start_date": null,
+  "state": "running"
+```
+
+#### Triggering workflows with messages
+
+You can also check the existency of file, new bank transactions with send message on Kafka.
+
+```python
+from airflow.providers.common.messaging.triggers.msg_queue import MessageQueueTrigger
+trigger = MessageQueueTrigger(
+    queue="kafka://kafka:9092/events", 
+    apply_function="custom.kafka_util.apply_function", 
+)
+```
+apply_function is used to define and trigger the DAG. With this function you can get spesific messages, not all the messages necessary or unnecessary. You can filter them.
+
+You can define the Asset with MessageQueueTrigger.
+
+```python
+from airflow.sdk import Asset, AssetWatcher
+asset = Asset("kafka_queue_asset", watchers=[
+AssetWatcher(name="kafka_watcher", trigger=trigger)
+])
+```
+After triggering the DAG, in Kafka CLI run this command:
+
+```bash
+$ /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka:9092 --topic events
+>
+```
+When the > appears, type something and press "Enter". A message will be send to Kafka topic. 
 
 
